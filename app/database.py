@@ -12,7 +12,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  
-    echo=True  
+    echo=os.getenv("SQL_ECHO") == "1",  
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

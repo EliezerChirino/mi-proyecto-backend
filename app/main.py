@@ -5,13 +5,14 @@ from typing import List
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
+import time
 
 # Importaciones locales
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app import schemas, models  # Agregar models si lo necesitas
 from app.servicios.device_service import DeviceService
 from app.servicios.estatus_service import StatusService
-from app.servicios.monitor_red import NetworkMonitor
+from app.servicios.monitor_red import verificar_dispositivo
 from app.utils.websocket_manager import ConnectionManager
 
 # Variables globales
@@ -19,74 +20,132 @@ monitoring_task = None
 websocket_manager = None
 
 
+
 # ============ TAREA DE MONITOREO EN SEGUNDO PLANO ============
-""" 
-async def background_monitoring_task():
-    
-    #Tarea que verifica el estado de todos los dispositivos cada 60 segundos
-    
-    print("🔄 Iniciando tarea de monitoreo en segundo plano...")
-    
-    from app.database import SessionLocal
-    
+
+INTERVALO_SONDEO_S = 30   # cada cuánto se verifica toda la red
+
+# Último estado conocido de cada equipo: {node_id: "online" | "offline"}
+# Sirve para avisar por WebSocket solo cuando algo CAMBIA.
+estados_previos = {}
+
+
+def cargar_estados_previos():
+    """Al arrancar, toma el último estado guardado para no anunciar todo como 'cambio'."""
+    db = SessionLocal()
+    try:
+        for item in DeviceService.get_devices_with_status(db):
+            if item["status"]:
+                estados_previos[item["device"].node_id] = item["status"].last_status
+    finally:
+        db.close()
+
+
+async def ciclo_de_sondeo():
+    """Verifica todos los dispositivos una vez, guarda los resultados y avisa los cambios."""
+    # 1. Leer la lista de equipos (y cerrar la sesión antes de la parte lenta)
+    db = SessionLocal()
+    try:
+        dispositivos = [
+            (d.id, d.node_id, d.nombre_dispositivo, d.ip)
+            for d in DeviceService.get_all_devices(db)
+        ]
+    finally:
+        db.close()
+
+    if not dispositivos:
+        print("No hay dispositivos para verificar")
+        return
+
+    print("\n" + "═" * 64)
+    print(f" SONDEO {datetime.now():%H:%M:%S} · {len(dispositivos)} dispositivo(s)")
+    print("═" * 64 + "\n")
+    inicio = time.perf_counter()
+
+    # 2. Verificar todos en paralelo
+    resultados = await asyncio.gather(
+        *(verificar_dispositivo(ip, nombre) for (_, _, nombre, ip) in dispositivos)
+    )
+
+    # 3. Guardar y detectar cambios
+    cambios = []
+    db = SessionLocal()
+    try:
+        for (device_id, node_id, nombre, ip), resultado in zip(dispositivos, resultados):
+            try:
+                StatusService.save_device_status(db, device_id, resultado)
+            except Exception as e:
+                db.rollback()
+                print(f" No se pudo guardar el estado de {nombre}: {e}")
+                continue
+
+            anterior = estados_previos.get(node_id)
+            estados_previos[node_id] = resultado["status"]
+            if anterior != resultado["status"]:
+                cambios.append({
+                    "type": "status_update",
+                    "data": {
+                        "node_id": node_id,
+                        "nombre_dispositivo": nombre,
+                        "ip": ip,
+                        "status": resultado["status"],
+                        "previous_status": anterior,
+                        "response_time_ms": resultado["response_time_ms"],
+                        "check_method": resultado["check_method"],
+                        "checked_at": datetime.now().isoformat(),
+                        "error_message": resultado["error_message"],
+                    },
+                })
+    finally:
+        db.close()
+
+    en_linea = sum(1 for r in resultados if r["status"] == "online")
+    print("─" * 64)
+    print(
+        f" {en_linea} en línea · {len(resultados) - en_linea} fuera de línea · "
+        f"{len(cambios)} cambio(s) · {time.perf_counter() - inicio:.1f} s"
+    )
+    for cambio in cambios:
+        d = cambio["data"]
+        antes = d["previous_status"] or "nuevo"
+        print(f"   ↳ {d['nombre_dispositivo']}: {antes} → {d['status']}")
+    print("═" * 64)
+
+    # 4. Avisar solo los cambios
+    if cambios and websocket_manager:
+        for cambio in cambios:
+            await websocket_manager.broadcast(cambio)
+
+
+async def tarea_monitoreo():
+    """Repite el sondeo cada INTERVALO_SONDEO_S segundos mientras la API esté viva."""
+    print(f" -> Monitoreo en segundo plano: cada {INTERVALO_SONDEO_S} s")
+    cargar_estados_previos()
     while True:
         try:
-            await asyncio.sleep(60)  
-            db = SessionLocal()
-            try:
-                devices = DeviceService.get_all_devices(db)
-                
-                if not devices:
-                    print("⚠️  No hay dispositivos para verificar")
-                    continue
-                
-                # Verificar cada dispositivo
-                updates = []
-                for device in devices:
-                    print(f"Verificando {device.nombre_dispositivo} ({device.ip})...")
-                    
-                    # Realizar verificación
-                    check_result = NetworkMonitor.verificar_dispositivo(device.ip, check_method="both")
-                    
-                    # Guardar en BD
-                    StatusService.save_device_status(db, device.id, check_result)
-                    
-                    # Log del resultado
-                    status_icon = "✅" if check_result["status"] == "online" else "❌"
-                    print(f"{status_icon} {device.nombre_dispositivo}: {check_result['status'].upper()}")
-                    
-                    # Preparar actualización para WebSocket
-                    updates.append({
-                        "type": "status_update",
-                        "data": {
-                            "node_id": device.node_id,
-                            "nombre_dispositivo": device.nombre_dispositivo,
-                            "ip": device.ip,
-                            "status": check_result["status"],
-                            "response_time_ms": check_result.get("response_time_ms"),
-                            "check_method": check_result["check_method"],
-                            "checked_at": datetime.now().isoformat(),
-                            "error_message": check_result.get("error_message")
-                        }
-                    })
-                
-                # Enviar actualizaciones por WebSocket
-                if websocket_manager and websocket_manager.active_connections:
-                    for update in updates:
-                        await websocket_manager.broadcast(update)
-                    print(f"Actualizaciones enviadas a {len(websocket_manager.active_connections)} cliente(s)")
-                
-                print("=" * 60 + "\n")
-                
-            finally:
-                db.close()
-                
+            await ciclo_de_sondeo()
         except Exception as e:
-            print(f" Error en tarea de monitoreo: {e}")
-            await asyncio.sleep(10)"""
+            # Un error en un ciclo no debe matar el monitoreo
+            print(f"Error en el ciclo de monitoreo: {e}")
+        await asyncio.sleep(INTERVALO_SONDEO_S)
 
 
-# ============ LIFECYCLE EVENTS ============
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -103,8 +162,8 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     
     websocket_manager = ConnectionManager()
-    #monitoring_task = asyncio.create_task(background_monitoring_task())
-    print("✅ Tarea de monitoreo iniciada\n")
+    monitoring_task = asyncio.create_task(tarea_monitoreo())
+    print(" Tarea de monitoreo iniciada\n")
     
     yield  # La aplicación corre aquí
     
@@ -257,20 +316,20 @@ async def bulk_create_devices(
                         if key != "node_id":  # No actualizar el ID
                             setattr(existing_device, key, value)
                     updated += 1
-                    print(f"🔄 Actualizando: {device_data.id}")
+                    print(f"Actualizando: {device_data.id}")
                 else:
                     # CREAR nuevo dispositivo
                     new_device = models.Device(**device_dict)
                     db.add(new_device)
                     created += 1
-                    print(f"✅ Creando: {device_data.id}")
+                    print(f"Creando: {device_data.id}")
 
             except Exception as e:
                 errors.append({
                     "device_id": device_data.id,
                     "error": str(e)
                 })
-                print(f"❌ Error en {device_data.id}: {str(e)}")
+                print(f" Error en {device_data.id}: {str(e)}")
 
         # Guardar cambios
         db.commit()
@@ -289,7 +348,7 @@ async def bulk_create_devices(
 
     except Exception as e:
         db.rollback()
-        print(f"❌ Error crítico: {str(e)}")
+        print(f" Error crítico: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/connections/sync")
@@ -323,13 +382,13 @@ async def sync_connections(
         result = DeviceService.sync_all_connections(db, edges)
         
         return {
-            "message": "✅ Conexiones sincronizadas exitosamente",
+            "message": " Conexiones sincronizadas exitosamente",
             "statistics": result
         }
         
     except Exception as e:
         db.rollback()
-        print(f"❌ Error en sincronización: {str(e)}")
+        print(f" Error en sincronización: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Error al sincronizar conexiones: {str(e)}"
@@ -409,7 +468,8 @@ async def check_device_manual(
     print(f"🔍 Verificación manual de {device.nombre_dispositivo} ({device.ip})")
     
     # Realizar verificación
-    check_result = NetworkMonitor.verificar_dispositivo(device.ip, check_request.check_method)
+    check_result = await verificar_dispositivo(device.ip, device.nombre_dispositivo)
+    estados_previos[device.node_id] = check_result["status"]
     
     # Guardar en BD
     StatusService.save_device_status(db, device.id, check_result)
@@ -508,7 +568,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Enviar mensaje de bienvenida
         await websocket.send_json({
             "type": "connection",
-            "message": "✅ Conectado al sistema de monitoreo",
+            "message": "bellaco, esta conectado al sistema de monitoreo",
             "timestamp": datetime.now().isoformat()
         })
         
@@ -527,7 +587,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         websocket_manager.disconnect(websocket)
     except Exception as e:
-        print(f"❌ Error en WebSocket: {e}")
+        print(f"Error en WebSocket: {e}")
         websocket_manager.disconnect(websocket)
 
 
@@ -537,11 +597,11 @@ if __name__ == "__main__":
     import uvicorn
     
     print("\n" + "=" * 60)
-    print("🌐 Iniciando servidor FastAPI")
+    print("qlq pa se está Iniciando servidor der baquen")
     print("=" * 60)
-    print("📍 URL: http://localhost:8080")
-    print("📚 Documentación: http://localhost:8080/docs")
-    print("🔌 WebSocket: ws://localhost:8080/ws")
+    print("URL: http://localhost:8080")
+    print("Documentación pa ver como van las apis: http://localhost:8080/docs")
+    print(" Er WebSocket: ws://localhost:8080/ws")
     print("=" * 60 + "\n")
     
     uvicorn.run(

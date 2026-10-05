@@ -103,7 +103,10 @@ class DeviceStatusSummary(Base):
     first_seen_online = Column(DateTime(timezone=True))
     last_seen_online = Column(DateTime(timezone=True))
     last_seen_offline = Column(DateTime(timezone=True))
-    
+
+    total_checks = Column(Integer, nullable=False, server_default="0", default=0)
+    total_failures = Column(Integer, nullable=False, server_default="0", default=0)
+    uptime_percentage = Column(Float)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relación

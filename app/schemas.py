@@ -115,6 +115,9 @@ class DeviceStatusSummaryResponse(BaseModel):
     last_seen_online: Optional[datetime] = None
     last_seen_offline: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    total_checks: Optional[int] = None
+    total_failures: Optional[int] = None
+    uptime_percentage: Optional[float] = None
     
     model_config = ConfigDict(from_attributes=True)
 

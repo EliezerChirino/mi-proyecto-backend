@@ -50,17 +50,17 @@ class DeviceService:
         
         # 1️⃣ Obtener todos los node_ids del frontend
         frontend_node_ids = {node.get("id") for node in frontend_nodes if node.get("id")}
-        print(f"📊 Dispositivos en frontend: {len(frontend_node_ids)}")
+        print(f" Dispositivos en frontend: {len(frontend_node_ids)}")
         
         # 2️⃣ Obtener todos los dispositivos de la BD
         db_devices = db.query(models.Device).all()
-        print(f"📊 Dispositivos en BD: {len(db_devices)}")
+        print(f"Dispositivos en BD: {len(db_devices)}")
         
         # 3️⃣ ELIMINAR dispositivos que ya NO están en el frontend
         deleted_count = 0
         for device in db_devices:
             if device.node_id not in frontend_node_ids:
-                print(f"🗑️ Eliminando dispositivo: {device.node_id} ({device.nombre_dispositivo})")
+                print(f"Eliminando dispositivo: {device.node_id} ({device.nombre_dispositivo})")
                 db.delete(device)
                 deleted_count += 1
         
@@ -68,7 +68,7 @@ class DeviceService:
         if deleted_count > 0:
             db.commit()
         
-        print(f"✅ Dispositivos eliminados: {deleted_count}")
+        print(f" Dispositivos eliminados: {deleted_count}")
         
         return {
             "deleted": deleted_count,
@@ -98,7 +98,7 @@ class DeviceService:
                     gateway=frontend_device.data.gateway,
                     vlan=frontend_device.data.vlan,
                     puerto=frontend_device.data.puerto,
-                    dns=frontend_device.data.dns,  # ✅ CORREGIDO (era DNS en mayúscula)
+                    dns=frontend_device.data.dns,  #  CORREGIDO (era DNS en mayúscula)
                     ubicacion=frontend_device.data.ubicacion,
                     descripcion=frontend_device.data.descripcion,
                     position_x=frontend_device.posicion.x,
@@ -170,7 +170,7 @@ class DeviceService:
                     gateway=frontend_device.data.gateway,
                     vlan=frontend_device.data.vlan,
                     puerto=frontend_device.data.puerto,
-                    dns=frontend_device.data.dns,  # ✅ YA ESTABA CORRECTO AQUÍ
+                    dns=frontend_device.data.dns,  #  YA ESTABA CORRECTO AQUÍ
                     ubicacion=frontend_device.data.ubicacion,
                     descripcion=frontend_device.data.descripcion,
                     position_x=frontend_device.posicion.x,
@@ -220,14 +220,14 @@ class DeviceService:
                     node_to_device_id[frontend_device.id] = new_device.id
                     stats["created"] += 1
                     
-                    print(f"✅ Dispositivo creado: {new_device.nombre_dispositivo}")
+                    print(f" Dispositivo creado: {new_device.nombre_dispositivo}")
                     
             except Exception as e:
                 errors.append({
                     "node_id": frontend_device.id,
                     "error": str(e)
                 })
-                print(f"❌ Error procesando {frontend_device.id}: {str(e)}")
+                print(f" Error procesando {frontend_device.id}: {str(e)}")
                 db.rollback()
         
         return processed_devices, errors, stats
@@ -333,11 +333,11 @@ class DeviceService:
             dict: Estadísticas de la sincronización
         """
         
-        # 1️⃣ Obtener TODAS las conexiones actuales de la BD
+        # 1 Obtener TODAS las conexiones actuales de la BD
         current_connections = db.query(models.DeviceConnection).all()
-        print(f"📊 Conexiones actuales en BD: {len(current_connections)}")
+        print(f" Conexiones actuales en BD: {len(current_connections)}")
         
-        # 2️⃣ Crear set de tuplas (source, target, sourceHandle, targetHandle)
+        # 2  Crear set de tuplas (source, target, sourceHandle, targetHandle)
         frontend_connections = set()
         edge_details = {}
         
@@ -358,11 +358,11 @@ class DeviceService:
                     "targetHandle": target_handle
                 }
                 
-                print(f"🔗 Frontend: {source_id}[{source_handle}] → {target_id}[{target_handle}]")
+                print(f" Frontend: {source_id}[{source_handle}] → {target_id}[{target_handle}]")
         
-        print(f"📊 Conexiones en frontend: {len(frontend_connections)}")
+        print(f" Conexiones en frontend: {len(frontend_connections)}")
         
-        # 3️⃣ ELIMINAR conexiones que ya NO existen en el frontend
+        # 3 ELIMINAR conexiones que ya NO existen en el frontend
         deleted_count = 0
         for conn in current_connections:
             #  CREAR CLAVE incluyendo handles
@@ -374,11 +374,11 @@ class DeviceService:
             )
             
             if key not in frontend_connections:
-                print(f"🗑️ Eliminando: {conn.source_device.node_id}[{conn.source_handle}] → {conn.target_device.node_id}[{conn.target_handle}]")
+                print(f" Eliminando: {conn.source_device.node_id}[{conn.source_handle}] → {conn.target_device.node_id}[{conn.target_handle}]")
                 db.delete(conn)
                 deleted_count += 1
         
-        # 4️⃣ CREAR nuevas conexiones que no existen en BD
+        # 4 CREAR nuevas conexiones que no existen en BD
         created_count = 0
         for key in frontend_connections:
             source_node_id, target_node_id, source_handle, target_handle = key
@@ -419,15 +419,15 @@ class DeviceService:
                 )
                 db.add(new_conn)
                 created_count += 1
-                print(f"✅ Creando: {source_node_id}[{source_handle}] → {target_node_id}[{target_handle}]")
+                print(f" Creando: {source_node_id}[{source_handle}] → {target_node_id}[{target_handle}]")
         
-        # 5️⃣ Guardar cambios en BD
+        # 5 Guardar cambios en BD
         db.commit()
         
-        print(f"\n📊 Resumen:")
-        print(f"   ✅ Creadas: {created_count}")
-        print(f"   🗑️ Eliminadas: {deleted_count}")
-        print(f"   📦 Total en frontend: {len(frontend_connections)}")
+        print(f"\n Resumen:")
+        print(f"    Creadas: {created_count}")
+        print(f"    Eliminadas: {deleted_count}")
+        print(f"   Total en frontend: {len(frontend_connections)}")
         
         return {
             "connections_created": created_count,
